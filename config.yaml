@@ -1,0 +1,24 @@
+output_schema:
+  type: OBJECT
+  properties:
+    execution_id:
+      type: STRING
+    steps:
+      type: ARRAY
+      items:
+        $ref: "#/$defs/Step"
+  required:
+    - execution_id
+    - steps
+  $defs:
+    Step:
+      type: OBJECT
+      properties:
+        id:
+          type: STRING
+        name:
+          type: STRING
+        actions:
+          type: ARRAY
+          items:
+            type: STRING
