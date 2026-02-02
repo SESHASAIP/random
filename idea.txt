@@ -1,0 +1,29 @@
+I am brainstroming with you on one usecase . let's say I had a video of explaining how to create a mialbox in windows powerplatform , this video walks us throw the entire process of how to create mailbox . 
+
+
+
+so I am built a kind of a agent new agent in google adk . which observers the flow of the video like where it started . what were major milestones it was passing as a human. like video started at some time parent business unit creation was done . which was milestone first milestone . observe all that follow and see does it require the verification loop for this flow or not this particular unit .
+
+
+
+again other milestone creation of other business unit which is dependent on previous business unit so it should work sequnrtially . repeta the same things any looping required or any parrlely done things . 
+
+
+
+follow this pattern until the video is completed . 
+
+
+
+In addition the video a natural language script for the agent was also given to check flow of major milestones . and make decision what will the indivual agent LLM agent . or LoopAgent wrapped up in a LLM Agent for indivial milestone , 
+
+
+
+until now it was drafting of indiviual agents later . major thing this orchestration of these indiviual agents will the entire flow will be sequential or Parllel or loop just a workflow agent types in google adk 
+
+
+
+
+
+how was this idea looking . was this achievable ?
+
+how was similar ideas being implemented in outside world in google adk framework dynamic way of agent drafting ? 
