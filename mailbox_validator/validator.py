@@ -19,76 +19,188 @@ from playwright.async_api import async_playwright, Page
 
 
 # ---------------------------------------------------------------------------
-# Helper: detect whether a field is a lookup (hyperlink) or plain text
+# JavaScript executed inside the browser to find a field + read its value.
+# One evaluate call does it all — no locator roundtrip needed.
 # ---------------------------------------------------------------------------
-async def _is_lookup_field(field_container) -> bool:
-    """Return True if the field container holds a lookup link (anchor tag)."""
-    link = field_container.locator("a")
-    return await link.count() > 0
+_JS_FIND_FIELD = """
+(labelText) => {
+    const target = labelText.toLowerCase();
+
+    // ── Locate the field container (case-insensitive) ──────────────
+    let container = null;
+
+    // Strategy 1: div / section with a title attribute
+    for (const el of document.querySelectorAll('div[title], section[title]')) {
+        if (el.getAttribute('title').toLowerCase() === target) { container = el; break; }
+    }
+
+    // Strategy 2: elements with a matching aria-label
+    if (!container) {
+        for (const el of document.querySelectorAll('[aria-label]')) {
+            if (el.getAttribute('aria-label').toLowerCase() === target) { container = el; break; }
+        }
+    }
+
+    // Strategy 3: <label> whose text matches → parent container
+    if (!container) {
+        for (const lbl of document.querySelectorAll('label')) {
+            if ((lbl.textContent || '').trim().toLowerCase() === target) {
+                container = lbl.closest('div') || lbl.parentElement;
+                break;
+            }
+        }
+    }
+
+    // Strategy 4: data-id containing the slugified field name
+    if (!container) {
+        const slug  = target.replace(/\\s+/g, '');
+        const slug2 = target.replace(/\\s+/g, '_');
+        for (const el of document.querySelectorAll('[data-id]')) {
+            const did = el.getAttribute('data-id').toLowerCase();
+            if (did.includes(slug) || did.includes(slug2)) { container = el; break; }
+        }
+    }
+
+    if (!container) return null;
+
+    // ── Determine if it is a lookup (has an <a> hyperlink) ─────────
+    const anchorEl = container.querySelector('a');
+    const isLookup = anchorEl !== null && anchorEl.href && anchorEl.textContent.trim().length > 0;
+
+    // ── Read the current value ─────────────────────────────────────
+    let currentValue = '';
+    if (isLookup) {
+        currentValue = anchorEl.textContent.trim();
+    } else {
+        const input = container.querySelector('input, textarea');
+        if (input) {
+            currentValue = input.value || '';
+        } else {
+            const sel = container.querySelector('select');
+            if (sel && sel.selectedIndex >= 0) {
+                currentValue = sel.options[sel.selectedIndex].text || '';
+            } else {
+                // Last resort: visible text (skip the label itself)
+                const spans = container.querySelectorAll('span, div');
+                for (const s of spans) {
+                    const t = s.textContent.trim();
+                    if (t && t.toLowerCase() !== target) { currentValue = t; break; }
+                }
+            }
+        }
+    }
+
+    return { found: true, currentValue: currentValue.trim(), isLookup: isLookup };
+}
+"""
+
+_JS_FIND_FIELD_ELEMENT = """
+(labelText) => {
+    const target = labelText.toLowerCase();
+
+    for (const el of document.querySelectorAll('div[title], section[title]')) {
+        if (el.getAttribute('title').toLowerCase() === target) return el;
+    }
+    for (const el of document.querySelectorAll('[aria-label]')) {
+        if (el.getAttribute('aria-label').toLowerCase() === target) return el;
+    }
+    for (const lbl of document.querySelectorAll('label')) {
+        if ((lbl.textContent || '').trim().toLowerCase() === target) {
+            return lbl.closest('div') || lbl.parentElement;
+        }
+    }
+    const slug  = target.replace(/\\s+/g, '');
+    const slug2 = target.replace(/\\s+/g, '_');
+    for (const el of document.querySelectorAll('[data-id]')) {
+        const did = el.getAttribute('data-id').toLowerCase();
+        if (did.includes(slug) || did.includes(slug2)) return el;
+    }
+    return null;
+}
+"""
 
 
-async def _get_field_current_value(page: Page, label: str):
+async def _get_field_info(page: Page, label: str) -> dict | None:
     """
-    Locate a field by its label text and return (container, current_value, is_lookup).
+    Find a field by label (case-insensitive) and read its current value.
+    Everything runs inside a single page.evaluate — no locator needed.
+
+    Returns {"found": True, "currentValue": "...", "isLookup": True/False}
+    or None if the field was not found.
     """
-    # Dynamics 365 typically renders fields near their label.
-    # Try to find the field container associated with the label.
-    field_container = page.locator(
-        f"div[data-id='{label.lower().replace(' ', '_')}-field-container'], "
-        f"div:has(> label:text-is('{label}'))"
-    ).first
-
-    is_lookup = await _is_lookup_field(field_container)
-
-    if is_lookup:
-        link = field_container.locator("a").first
-        current_value = (await link.text_content() or "").strip()
-    else:
-        input_el = field_container.locator("input, textarea, select").first
-        current_value = (await input_el.input_value()).strip() if await input_el.count() > 0 else ""
-        # Fallback: maybe it is displayed as text
-        if not current_value:
-            current_value = (await field_container.locator("[data-id$='.fieldControl-text-box-text']").text_content() or "").strip()
-
-    return field_container, current_value, is_lookup
+    return await page.evaluate(_JS_FIND_FIELD, label.lower())
 
 
-async def _update_lookup_field(field_container, correct_value: str) -> None:
+async def _get_field_element(page: Page, label: str):
+    """
+    Return a Playwright ElementHandle for the field container so we can
+    interact with it (click, type, clear, etc.).
+    """
+    handle = await page.evaluate_handle(_JS_FIND_FIELD_ELEMENT, label)
+    return handle.as_element()
+
+
+
+async def _update_lookup_field(field_element, page: Page, correct_value: str) -> None:
     """Clear a lookup field via its × button, search with wildcards, and select."""
     # Click the × (clear / delete) button on the existing lookup value
-    clear_btn = field_container.locator(
-        "button[data-id$='.fieldControl-LookupResultsDropdown_clear'], "
-        "button:has(span:text('×')), "
-        "button[aria-label='Clear']"
-    ).first
-    await clear_btn.click()
-    await asyncio.sleep(0.5)
+    clear_btn = await page.evaluate_handle(
+        """(container) => {
+            return container.querySelector(
+                "button[aria-label='Clear'], button[data-id*='clear'], button.lookupClearButton"
+            ) || Array.from(container.querySelectorAll('button')).find(
+                b => b.textContent.includes('×') || b.textContent.includes('✕')
+            ) || null;
+        }""",
+        field_element,
+    )
+    clear_el = clear_btn.as_element()
+    if clear_el:
+        await clear_el.click()
+        await asyncio.sleep(0.5)
 
-    # Type the value wrapped in asterisks into the lookup search box
-    search_input = field_container.locator("input").first
-    await search_input.fill(f"*{correct_value}*")
-    await asyncio.sleep(2)  # wait for lookup results to load
+    # Find the input inside the container and type value wrapped in asterisks
+    search_input = await page.evaluate_handle(
+        "(container) => container.querySelector('input')",
+        field_element,
+    )
+    input_el = search_input.as_element()
+    if input_el:
+        await input_el.click()
+        await input_el.fill(f"*{correct_value}*")
+        await asyncio.sleep(2)  # wait for lookup results to load
 
     # Select the matching result from the dropdown
-    result_item = field_container.page.locator(
-        f"ul[aria-label='Lookup results'] li:has-text('{correct_value}')"
+    result_item = page.locator(
+        f"ul[aria-label='Lookup results'] li:has-text('{correct_value}'), "
+        f"div[role='listbox'] div:has-text('{correct_value}')"
     ).first
     await result_item.click()
     await asyncio.sleep(0.5)
 
 
-async def _update_plain_field(field_container, correct_value: str) -> None:
+async def _update_plain_field(field_element, page: Page, correct_value: str) -> None:
     """Clear a plain text / dropdown field and type the correct value."""
-    input_el = field_container.locator("input, textarea").first
-    if await input_el.count() > 0:
+    # Try input or textarea first
+    child = await page.evaluate_handle(
+        "(container) => container.querySelector('input, textarea')",
+        field_element,
+    )
+    input_el = child.as_element()
+    if input_el:
         await input_el.click()
         await input_el.fill("")
         await input_el.fill(correct_value)
-    else:
-        # Try select / dropdown
-        select_el = field_container.locator("select").first
-        if await select_el.count() > 0:
-            await select_el.select_option(label=correct_value)
+        return
+
+    # Try select / dropdown
+    child = await page.evaluate_handle(
+        "(container) => container.querySelector('select')",
+        field_element,
+    )
+    select_el = child.as_element()
+    if select_el:
+        await select_el.select_option(label=correct_value)
 
 
 # ---------------------------------------------------------------------------
@@ -212,19 +324,21 @@ async def validator_tool(
 
             for field_label, expected_value in fields_to_validate.items():
                 try:
-                    container, current_value, is_lookup = await _get_field_current_value(
-                        page, field_label
-                    )
+                    info = await _get_field_info(page, field_label)
+                    if info is None:
+                        print(f"[WARN] Field '{field_label}' not found on page")
+                        continue
 
-                    if current_value == expected_value:
+                    if info["currentValue"] == expected_value:
                         # Value matches → skip
                         continue
 
-                    # Value does not match → update
-                    if is_lookup:
-                        await _update_lookup_field(container, expected_value)
+                    # Value does not match → get element handle to interact
+                    el = await _get_field_element(page, field_label)
+                    if info["isLookup"]:
+                        await _update_lookup_field(el, page, expected_value)
                     else:
-                        await _update_plain_field(container, expected_value)
+                        await _update_plain_field(el, page, expected_value)
 
                 except Exception as exc:
                     print(f"[WARN] Could not process field '{field_label}': {exc}")
@@ -286,14 +400,16 @@ async def validator_tool(
             # ── Step 17: Incoming Email & Outgoing Email ─────────────
             for email_field_label in ("Incoming Email", "Outgoing Email"):
                 try:
-                    container, current_value, is_lookup = await _get_field_current_value(
-                        page, email_field_label
-                    )
-                    if current_value != "Server-Side Synchronization":
-                        if is_lookup:
-                            await _update_lookup_field(container, "Server-Side Synchronization")
+                    info = await _get_field_info(page, email_field_label)
+                    if info is None:
+                        print(f"[WARN] Field '{email_field_label}' not found on page")
+                        continue
+                    if info["currentValue"] != "Server-Side Synchronization":
+                        el = await _get_field_element(page, email_field_label)
+                        if info["isLookup"]:
+                            await _update_lookup_field(el, page, "Server-Side Synchronization")
                         else:
-                            await _update_plain_field(container, "Server-Side Synchronization")
+                            await _update_plain_field(el, page, "Server-Side Synchronization")
                 except Exception as exc:
                     print(f"[WARN] Could not process field '{email_field_label}': {exc}")
 
