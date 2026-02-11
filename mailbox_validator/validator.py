@@ -128,7 +128,7 @@ async def _get_field_info(page: Page, label: str) -> dict | None:
     Returns {"found": True, "currentValue": "...", "isLookup": True/False}
     or None if the field was not found.
     """
-    return await page.evaluate(_JS_FIND_FIELD, label.lower())
+    return await page.evaluate(_JS_FIND_FIELD, label)
 
 
 async def _get_field_element(page: Page, label: str):
