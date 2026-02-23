@@ -1,0 +1,53 @@
+name: my_pipeline_agent
+agent_class: custom_agent
+
+sub_agents:
+  - data_fetcher
+  - data_validator
+  - data_processor
+  - report_generator
+
+fallback_agents:
+  - data_fetcher_retry
+  - data_validator_fix
+  - data_processor_fix
+
+workflow:
+  steps:
+    - agent: data_fetcher
+      on_result:
+        success:
+          next: data_validator
+        failure:
+          call: data_fetcher_retry
+          then:
+            success:
+              next: data_validator
+            failure:
+              action: end
+
+    - agent: data_validator
+      on_result:
+        success:
+          next: data_processor
+        failure:
+          call: data_validator_fix
+          then:
+            success:
+              next: data_processor
+            failure:
+              action: end
+
+    - agent: data_processor
+      on_result:
+        success:
+          next: report_generator
+        failure:
+          action: end
+
+    - agent: report_generator
+      on_result:
+        success:
+          action: end
+        failure:
+          action: end
