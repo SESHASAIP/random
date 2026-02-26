@@ -1,0 +1,44 @@
+┌─────────────────────────────────────────────────────────────────────────┐
+│                           HAPPY PATH                                    │
+└─────────────────────────────────────────────────────────────────────────┘
+
+  CLIENT                FASTAPI                  KAFKA             WORKER
+    │                      │                       │                  │
+    │                      │ @app.post("/tasks")    │                  │
+    │                      │ @app.websocket(        │                  │
+    │                      │   "/tasks/{id}/watch") │                  │
+    │                      │ ← endpoints defined    │                  │
+    │                      │   on startup           │                  │
+    │                      │                        │                  │
+    │── POST /tasks ───────>│                       │                  │
+    │<── { task_id } ───────│                       │                  │
+    │                       │── produce ───────────>│ [tasks]          │
+    │                       │                       │<── consume ──────│
+    │                       │                       │                  │
+    │── WS /tasks/{id} ────>│ ← connects to         │      create CancellationToken
+    │   /watch              │   existing endpoint   │      execute task
+    │                       │   registers client    │                  │
+    │                       │   into subscribers[]  │                  │
+    │                       │                       │<── progress ─────│
+    │                       │<── consume ───────────│ [task-progress]  │
+    │<── stream update ─────│                       │                  │
+    │<── stream update ─────│                       │                  │
+    │<── "DONE" ────────────│                       │      commit offset
+    │   WS closes           │                       │      → next task │
+
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│                          STOP / CANCEL                                  │
+└─────────────────────────────────────────────────────────────────────────┘
+
+  CLIENT                FASTAPI                  KAFKA             WORKER
+    │                      │                       │                  │
+    │── WS send "STOP" ───>│                       │                  │
+    │                       │── produce ───────────>│ [task-control]   │
+    │                       │                       │<── consume (2nd thread)
+    │                       │                       │      token.cancel()
+    │                       │                       │      throw_if_cancelled()
+    │                       │                       │        ↓ StopSignal raised
+    │                       │                       │<── "STOPPED" ────│
+    │<── "STOPPED" ─────────│                       │      commit offset
+    │   WS closes           │                       │      → next task │
