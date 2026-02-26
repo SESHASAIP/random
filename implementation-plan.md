@@ -37,7 +37,7 @@ FastAPI fans out to all WebSocket clients watching that task_id
 ## Phase 1 — Infrastructure Setup
 
 - Spin up Kafka (Docker Compose for local/beta)
-- Create 3 topics: `tasks`, `task-progress`, `task-control`
+- Create 2 topics: `tasks`, `task-progress`
 - Confirm producer/consumer connectivity
 
 ---
@@ -124,7 +124,7 @@ Separate service (not inside FastAPI). Pulls one task at a time, calls upstream 
 ```
 Worker starts
   ├── Thread 1: main task consumer  (tasks topic)
-  └── Thread 2: control consumer   (task-control topic)
+  └── HTTP server: stop endpoint    (POST /internal/tasks/{id}/stop)
 
 
 KAFKA [tasks]            WORKER Thread 1
@@ -160,17 +160,17 @@ class CancellationToken:
     throw_if_cancelled()  → if is_set: raise StopSignal
 
 
-WORKER Thread 1 (execution)         WORKER Thread 2 (control consumer)
+WORKER Thread 1 (execution)         WORKER HTTP server (stop endpoint)
         │                                      │
         │  token = CancellationToken()          │
         │  active_tokens["abc"] = token         │
         │                                      │
-        │  execute_task(task, token)            │  KAFKA [task-control] sends STOP
+        │  execute_task(task, token)            │  POST /internal/tasks/abc/stop
         │     │                                 │       │
-        │     │── yield "Starting..."           │       │── consume signal ──────>│
-        │     │── throw_if_cancelled() ✓        │       │  task_id = "abc"        │
-        │     │── yield "Step 1 done"           │       │  token = active_tokens["abc"]
-        │     │── throw_if_cancelled() ✓        │       │  token.cancel()  ← sets flag
+        │     │── yield "Starting..."           │       │  task_id = "abc"
+        │     │── throw_if_cancelled() ✓        │       │  token = active_tokens["abc"]
+        │     │── yield "Step 1 done"           │       │  token.cancel()  ← sets flag
+        │     │── throw_if_cancelled() ✓        │       │  return 200 OK
         │     │── yield "Step 2 done"           │
         │     │── throw_if_cancelled() ✗ STOP  │
         │          ↓ StopSignal raised           │
@@ -369,17 +369,18 @@ STEP 2 — Client sends STOP over WebSocket
 CLIENT          FASTAPI
   │                │
   │── "STOP" ─────>│
-                   │  produce → [task-control]
-                   │  { task_id: "abc", signal: "STOP" }
+                   │  POST http://worker/internal/tasks/abc/stop
 
 
-STEP 3 — Worker Thread 2 picks up the stop signal
+STEP 3 — Worker HTTP endpoint sets the cancellation flag
 
-KAFKA [task-control]        WORKER Thread 2
-       │                          │
-       │── signal "abc:STOP" ────>│
-                                  │  active_tokens["abc"].cancel()
-                                  │  ← sets threading.Event flag
+FASTAPI                    WORKER (HTTP server)
+  │                               │
+  │── POST /internal/tasks/abc/stop ──>│
+                                  │  token = active_tokens["abc"]
+                                  │  token.cancel()   ← sets threading.Event flag
+                                  │  return 200 OK
+  │<── 200 OK ───────────────────-│
 
 
 STEP 4 — Worker Thread 1 hits next checkpoint
@@ -464,4 +465,9 @@ FINE checkpoints (fast to respond):
 |---|---|---|---|
 | `tasks` | FastAPI | Worker Thread 1 | `{ task_id, project, type, command?, params }` |
 | `task-progress` | Worker | FastAPI background | `{ task_id, update }` |
-| `task-control` | FastAPI | Worker Thread 2 | `{ task_id, signal: "STOP" }` |
+
+## Worker Stop Endpoint Reference
+
+| Endpoint | Caller | Handler | Effect |
+|---|---|---|---|
+| `POST /internal/tasks/{id}/stop` | FastAPI | Worker HTTP server | Calls `active_tokens[id].cancel()`, returns 200 OK. 404 if task not found. |
