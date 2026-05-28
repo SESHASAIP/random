@@ -1,0 +1,3 @@
+$c = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2("C:\path\cert.pem")
+Write-Host "Expires : $($c.NotAfter)"
+Write-Host "Serial  : $($c.SerialNumber)"
