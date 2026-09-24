@@ -1,0 +1,7 @@
+Case 1: lookup family exists. Build the FieldSpec deterministically from the lookup. The description goes into both grep (exact + fuzzy + regex variants) and semantic search, and the family's allowed values become the validator later. No LLM is needed at this stage.
+
+Case 2: no lookup. A small LLM step, a "field interpreter", produces the FieldSpec. To keep it from guessing, ground it with three things:
+
+An abbreviation dictionary mined from the Case 1 fields. Your lookup families already teach you cde→code, amt→amount, dt→date, fod→facility.... Build a token→expansion table from them and feed it to the prompt, so the LLM decodes using your org's conventions instead of generic ones.
+Sibling context. Pass the other fields in the same table or family, plus their resolved descriptions. fod_cde_commited makes more sense when the model sees fod_amt_commited and fod_dt_eff next to it.
+Few-shot examples of already-resolved target→description pairs.
